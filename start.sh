@@ -11,24 +11,33 @@ apt-get install -y -qq git wget python3.10 python3-pip ffmpeg git-lfs curl
 update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1
 python3 -m pip install --upgrade pip
 
-# Clone API repository
+# Clone or update API repository
 cd /workspace
-if [ ! -d "api" ]; then
+if [ -d "api" ]; then
+  echo "Updating existing API repository..."
+  cd api && git pull origin main && cd /workspace
+else
+  echo "Cloning API repository..."
   git clone https://github.com/yepicaiaaron/memflow-runpod-api.git api
 fi
 cd api
 
 # Install dependencies
+echo "Installing Python dependencies..."
 python3 -m pip install -r requirements.txt
 
-# Clone MemFlow
+# Clone or update MemFlow
 cd /workspace
-if [ ! -d "memflow" ]; then
+if [ -d "memflow" ]; then
+  echo "MemFlow directory exists, skipping clone..."
+else
+  echo "Cloning MemFlow repository..."
   git clone https://github.com/KlingTeam/MemFlow.git memflow
 fi
 cd memflow
 
 # Download models
+echo "Downloading models..."
 mkdir -p wan_models/Wan2.1-T2V-1.3B checkpoints
 huggingface-cli download Wan-AI/Wan2.1-T2V-1.3B --local-dir wan_models/Wan2.1-T2V-1.3B
 huggingface-cli download KlingTeam/MemFlow --local-dir checkpoints
