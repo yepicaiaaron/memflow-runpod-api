@@ -13,7 +13,9 @@ python3 -m pip install --upgrade pip
 
 # Clone API repository
 cd /workspace
-git clone https://github.com/yepicaiaaron/memflow-runpod-api.git api
+if [ ! -d "api" ]; then
+  git clone https://github.com/yepicaiaaron/memflow-runpod-api.git api
+fi
 cd api
 
 # Install dependencies
@@ -21,7 +23,9 @@ python3 -m pip install -r requirements.txt
 
 # Clone MemFlow
 cd /workspace
-git clone https://github.com/KlingTeam/MemFlow.git memflow
+if [ ! -d "memflow" ]; then
+  git clone https://github.com/KlingTeam/MemFlow.git memflow
+fi
 cd memflow
 
 # Download models
@@ -29,7 +33,7 @@ mkdir -p wan_models/Wan2.1-T2V-1.3B checkpoints
 huggingface-cli download Wan-AI/Wan2.1-T2V-1.3B --local-dir wan_models/Wan2.1-T2V-1.3B
 huggingface-cli download KlingTeam/MemFlow --local-dir checkpoints
 
-# Start API
+# Start FastAPI server
 cd /workspace/api
-export PYTHONPATH=/workspace/memflow:$PYTHONPATH
+echo "Starting FastAPI server on port 8000..."
 python3 -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
