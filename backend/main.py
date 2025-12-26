@@ -81,7 +81,7 @@ async def generate_video(request: VideoRequest):
         
         # Build command to run MemFlow inference
         cmd = [
-            "python", str(MEMFLOW_DIR / "inference.py"),
+            sys.executable, str(MEMFLOW_DIR / "inference.py"),
             "--config_path", str(CONFIG_PATH),
             "--prompt", request.prompt,
             "--output_folder", str(OUTPUT_DIR),
@@ -160,11 +160,10 @@ async def generate_interactive_video(request: InteractiveVideoRequest):
         
         # Run interactive inference
         cmd = [
-            "python", str(MEMFLOW_DIR / "interactive_inference.py"),
+            sys.executable, str(MEMFLOW_DIR / "interactive_inference.py"),
             "--config_path", str(MEMFLOW_DIR / "configs" / "interactive_inference.yaml"),
             "--extended_prompt_path", str(prompts_file),
             "--output_folder", str(OUTPUT_DIR)
-        ]
         
         process = subprocess.run(
             cmd,
