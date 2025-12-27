@@ -36,8 +36,7 @@ cd memflow
 
 # Install MemFlow dependencies
 echo "Installing MemFlow dependencies..."
-python3 -m pip install -r requirements.txt
-
+/usr/bin/python3 -m pip install -r requirements.txt
 # Download models
 echo "Downloading models..."
 mkdir -p wan_models/Wan2.1-T2V-1.3B checkpoints
