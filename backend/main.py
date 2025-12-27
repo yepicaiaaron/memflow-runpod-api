@@ -164,6 +164,7 @@ async def generate_interactive_video(request: InteractiveVideoRequest):
             "--config_path", str(MEMFLOW_DIR / "configs" / "interactive_inference.yaml"),
             "--extended_prompt_path", str(prompts_file),
             "--output_folder", str(OUTPUT_DIR)
+        ]
         
         process = subprocess.run(
             cmd,
