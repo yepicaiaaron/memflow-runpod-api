@@ -1,4 +1,4 @@
-"""FastAPI backend for MemFlow video generation using subprocess execution."""
+"""FastAPI backend for MemFlow video generation with direct Python integration."""
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -6,11 +6,14 @@ from pydantic import BaseModel
 import sys
 import os
 import torch
-import subprocess
-import json
-import uuid
-from pathlib import Path
+from omegaconf import OmegaConf
 import logging
+from pathlib import Path
+import uuid
+from typing import Optional
+import tempfile
+from einops import rearrange
+from torchvision.io import write_video
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -30,13 +33,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Output directory for videos
-OUTPUT_DIR = Path("/workspace/outputs")
-OUTPUT_DIR.mkdir(exist_ok=True)
-
-# MemFlow paths
-MEMFLOW_DIR = Path("/workspace/memflow")
-CONFIG_PATH = MEMFLOW_DIR / "configs" / "inference.yaml"
+# Global pipeline variable
+pipeline = None
+config = None
 
 class VideoRequest(BaseModel):
     prompt: str
@@ -44,10 +43,108 @@ class VideoRequest(BaseModel):
     fps: int = 24
     guidance_scale: float = 7.5
 
-class InteractiveVideoRequest(BaseModel):
-    prompts: list[str]
-    num_frames_per_prompt: int = 121
-    fps: int = 24
+@app.on_event("startup")
+async def startup_event():
+    """Initialize MemFlow pipeline on startup."""
+    global pipeline, config
+    try:
+        logger.info("Initializing MemFlow pipeline...")
+        
+        # Import MemFlow modules
+        from pipeline import CausalInferencePipeline
+        
+        # Create config programmatically
+        config = OmegaConf.create({
+            'denoising_step_list': [1000, 750, 500, 250],
+            'warp_denoising_step': True,
+            'num_frame_per_block': 3,
+            'model_name': 'Wan2.1-T2V-1.3B',
+            'model_kwargs': {
+                'local_attn_size': 12,
+                'timestep_shift': 5.0,
+                'sink_size': 3,
+                'bank_size': 3,
+                'record_interval': 3,
+                'SMA': False
+            },
+            'num_output_frames': 120,
+            'use_ema': False,
+            'seed': 0,
+            'num_samples': 1,
+            'global_sink': True,
+            'context_noise': 0,
+            'generator_ckpt': '/workspace/memflow/checkpoints/base.pt',
+            'lora_ckpt': '/workspace/memflow/checkpoints/lora.pt',
+            'adapter': {
+                'type': 'lora',
+                'rank': 256,
+                'alpha': 256,
+                'dropout': 0.0,
+                'dtype': 'bfloat16',
+                'verbose': False
+            },
+            'distributed': False
+        })
+        
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        logger.info(f"Using device: {device}")
+        
+        # Initialize pipeline
+        pipeline = CausalInferencePipeline(config, device=device)
+        
+        # Load generator checkpoint
+        if config.generator_ckpt and Path(config.generator_ckpt).exists():
+            logger.info(f"Loading checkpoint from {config.generator_ckpt}")
+            state_dict = torch.load(config.generator_ckpt, map_location="cpu")
+            if "generator" in state_dict or "generator_ema" in state_dict:
+                raw_gen_state_dict = state_dict["generator_ema" if config.use_ema else "generator"]
+            elif "model" in state_dict:
+                raw_gen_state_dict = state_dict["model"]
+            else:
+                logger.warning("Generator state dict not found in checkpoint")
+                raw_gen_state_dict = None
+            
+            if raw_gen_state_dict:
+                pipeline.generator.load_state_dict(raw_gen_state_dict, strict=False)
+                logger.info("Generator checkpoint loaded")
+        
+        # Load LoRA if available
+        if hasattr(config, 'adapter') and config.adapter:
+            try:
+                from utils.lora_utils import configure_lora_for_model
+                import peft
+                
+                logger.info("Applying LoRA to generator")
+                pipeline.generator.model = configure_lora_for_model(
+                    pipeline.generator.model,
+                    model_name="generator",
+                    lora_config=config.adapter,
+                    is_main_process=True
+                )
+                
+                if config.lora_ckpt and Path(config.lora_ckpt).exists():
+                    logger.info(f"Loading LoRA checkpoint from {config.lora_ckpt}")
+                    lora_checkpoint = torch.load(config.lora_ckpt, map_location="cpu")
+                    if isinstance(lora_checkpoint, dict) and "generator_lora" in lora_checkpoint:
+                        peft.set_peft_model_state_dict(pipeline.generator.model, lora_checkpoint["generator_lora"])
+                    else:
+                        peft.set_peft_model_state_dict(pipeline.generator.model, lora_checkpoint)
+                    logger.info("LoRA weights loaded")
+                    pipeline.is_lora_enabled = True
+            except Exception as e:
+                logger.warning(f"LoRA loading failed: {e}")
+                pipeline.is_lora_enabled = False
+        
+        # Move to appropriate dtype and device
+        pipeline = pipeline.to(dtype=torch.bfloat16)
+        pipeline.generator.to(device=device)
+        pipeline.vae.to(device=device)
+        
+        logger.info("MemFlow pipeline initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize MemFlow: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
 
 @app.get("/")
 async def root():
@@ -56,190 +153,87 @@ async def root():
 @app.get("/health")
 async def health():
     """Health check endpoint."""
+    memflow_available = pipeline is not None
+    gpu_available = torch.cuda.is_available()
+    gpu_count = torch.cuda.device_count() if gpu_available else 0
+    
     return {
-        "status": "healthy",
-        "memflow_available": MEMFLOW_DIR.exists(),
-        "config_exists": CONFIG_PATH.exists(),
-        "gpu_available": torch.cuda.is_available(),
-        "gpu_count": torch.cuda.device_count() if torch.cuda.is_available() else 0
+        "status": "healthy" if memflow_available else "initializing",
+        "memflow_available": memflow_available,
+        "config_exists": config is not None,
+        "gpu_available": gpu_available,
+        "gpu_count": gpu_count
     }
 
 @app.post("/generate")
 async def generate_video(request: VideoRequest):
-    """Generate video from single text prompt using MemFlow subprocess."""
+    """Generate video from text prompt."""
+    global pipeline, config
+    
+    if pipeline is None:
+        raise HTTPException(status_code=503, detail="MemFlow pipeline not initialized")
+    
     try:
-        # Create unique output filename
-        video_id = str(uuid.uuid4())
-        output_file = OUTPUT_DIR / f"{video_id}.mp4"
-        
-        # Create temporary prompt file
-        prompt_file = OUTPUT_DIR / f"{video_id}_prompt.txt"
-        with open(prompt_file, 'w') as f:
-            f.write(request.prompt)
-        
         logger.info(f"Generating video for prompt: {request.prompt}")
         
-        # Build command to run MemFlow inference
-        cmd = [
-            sys.executable, str(MEMFLOW_DIR / "inference.py"),
-            "--config_path", str(CONFIG_PATH),
-            "--prompt", request.prompt,
-            "--output_folder", str(OUTPUT_DIR),
-            "--num_samples", "1",
-            "--guidance_scale", str(request.guidance_scale)
-        ]
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        # Execute MemFlow inference
-        logger.info(f"Running command: {' '.join(cmd)}")
-        process = subprocess.run(
-            cmd,
-            
-            capture_output=True,
-            text=True,
-            timeout=300  # 5 minute timeout
+        # Prepare prompt
+        prompts = [request.prompt]
+        
+        # Generate noise
+        sampled_noise = torch.randn(
+            [1, config.num_output_frames, 16, 60, 104], 
+            device=device, 
+            dtype=torch.bfloat16
         )
         
-        if process.returncode != 0:
-            logger.error(f"MemFlow error: {process.stderr}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Video generation failed: {process.stderr}"
-            )
-        
-        # Find generated video file
-        # MemFlow saves videos with pattern: output_folder/regular_0.mp4
-        generated_files = list(OUTPUT_DIR.glob("*.mp4"))
-        if not generated_files:
-            raise HTTPException(
-                status_code=500,
-                detail="Video was generated but file not found"
-            )
-        
-        # Get the most recently created video
-        latest_video = max(generated_files, key=lambda p: p.stat().st_ctime)
-        
-        # Rename to our UUID
-        latest_video.rename(output_file)
-        
-        # Cleanup prompt file
-        prompt_file.unlink(missing_ok=True)
-        
-        logger.info(f"Video generated successfully: {output_file}")
-        
-        return {
-            "video_id": video_id,
-            "status": "success",
-            "video_url": f"/video/{video_id}",
-            "prompt": request.prompt,
-            "duration_seconds": request.num_frames / request.fps
-        }
-        
-    except subprocess.TimeoutExpired:
-        raise HTTPException(
-            status_code=504,
-            detail="Video generation timeout (>5 minutes)"
+        # Generate video
+        logger.info("Running inference...")
+        video, latents = pipeline.inference(
+            noise=sampled_noise,
+            text_prompts=prompts,
+            return_latents=True,
+            low_memory=True,
+            profile=False
         )
-    except Exception as e:
-        logger.error(f"Error generating video: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/generate-interactive")
-async def generate_interactive_video(request: InteractiveVideoRequest):
-    """Generate interactive long video from multiple prompts."""
-    try:
+        
+        # Process video
+        current_video = rearrange(video, 'b t c h w -> b t h w c').cpu()
+        video_output = 255.0 * current_video
+        
+        # Save video to temporary file
         video_id = str(uuid.uuid4())
+        output_dir = Path("/workspace/api/videos")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"{video_id}.mp4"
         
-        # Create JSONL file with prompts for interactive generation
-        prompts_file = OUTPUT_DIR / f"{video_id}_prompts.jsonl"
-        with open(prompts_file, 'w') as f:
-            for i, prompt in enumerate(request.prompts):
-                json.dump({"text": prompt, "index": i}, f)
-                f.write('\n')
+        write_video(str(output_path), video_output[0], fps=request.fps)
         
-        logger.info(f"Generating interactive video with {len(request.prompts)} prompts")
+        # Clear cache
+        if hasattr(pipeline.vae, 'model') and hasattr(pipeline.vae.model, 'clear_cache'):
+            pipeline.vae.model.clear_cache()
         
-        # Run interactive inference
-        cmd = [
-            sys.executable, str(MEMFLOW_DIR / "interactive_inference.py"),
-            "--config_path", str(MEMFLOW_DIR / "configs" / "interactive_inference.yaml"),
-            "--extended_prompt_path", str(prompts_file),
-            "--output_folder", str(OUTPUT_DIR)
-        ]
-        
-        process = subprocess.run(
-            cmd,
-            cwd=str(MEMFLOW_DIR),
-            capture_output=True,
-            text=True,
-            timeout=600  # 10 minute timeout for long video
-        )
-        
-        if process.returncode != 0:
-            logger.error(f"Interactive generation error: {process.stderr}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Interactive video generation failed: {process.stderr}"
-            )
-        
-        # Find and rename generated video
-        generated_files = list(OUTPUT_DIR.glob("*.mp4"))
-        if not generated_files:
-            raise HTTPException(
-                status_code=500,
-                detail="Interactive video was generated but file not found"
-            )
-        
-        latest_video = max(generated_files, key=lambda p: p.stat().st_ctime)
-        output_file = OUTPUT_DIR / f"{video_id}.mp4"
-        latest_video.rename(output_file)
-        
-        prompts_file.unlink(missing_ok=True)
+        logger.info(f"Video generated successfully: {output_path}")
         
         return {
             "video_id": video_id,
-            "status": "success",
-            "video_url": f"/video/{video_id}",
-            "num_prompts": len(request.prompts),
-            "prompts": request.prompts
+            "status": "completed",
+            "prompt": request.prompt,
+            "num_frames": config.num_output_frames,
+            "fps": request.fps
         }
         
     except Exception as e:
-        logger.error(f"Error in interactive generation: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/transcribe")
-async def transcribe_audio(file: UploadFile = File(...)):
-    """Transcribe audio to text using Whisper."""
-    try:
-        import whisper
-        
-        # Save uploaded file
-        audio_path = OUTPUT_DIR / f"temp_{uuid.uuid4()}.{file.filename.split('.')[-1]}"
-        with open(audio_path, 'wb') as f:
-            f.write(await file.read())
-        
-        # Load Whisper model
-        model = whisper.load_model("base")
-        
-        # Transcribe
-        result = model.transcribe(str(audio_path))
-        
-        # Cleanup
-        audio_path.unlink(missing_ok=True)
-        
-        return {
-            "text": result["text"],
-            "language": result.get("language", "unknown")
-        }
-        
-    except Exception as e:
-        logger.error(f"Transcription error: {str(e)}")
+        logger.error(f"Video generation failed: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/video/{video_id}")
 async def get_video(video_id: str):
-    """Retrieve generated video by ID."""
-    video_path = OUTPUT_DIR / f"{video_id}.mp4"
+    """Retrieve generated video."""
+    video_path = Path(f"/workspace/api/videos/{video_id}.mp4")
     
     if not video_path.exists():
         raise HTTPException(status_code=404, detail="Video not found")
@@ -247,22 +241,22 @@ async def get_video(video_id: str):
     return FileResponse(
         video_path,
         media_type="video/mp4",
-        filename=f"memflow_{video_id}.mp4"
+        filename=f"{video_id}.mp4"
     )
 
 @app.get("/videos")
 async def list_videos():
     """List all generated videos."""
+    video_dir = Path("/workspace/api/videos")
+    if not video_dir.exists():
+        return {"videos": []}
+    
     videos = []
-    for video_file in OUTPUT_DIR.glob("*.mp4"):
+    for video_file in video_dir.glob("*.mp4"):
         videos.append({
             "video_id": video_file.stem,
             "filename": video_file.name,
-            "size_mb": video_file.stat().st_size / (1024 * 1024),
-            "created": video_file.stat().st_ctime
+            "size": video_file.stat().st_size
         })
-    return {"videos": videos, "count": len(videos)}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    
+    return {"videos": videos}
