@@ -26,6 +26,9 @@ RUN pip3 install --no-cache-dir -r requirements.txt
 # Clone MemFlow repository
 RUN git clone https://github.com/KlingTeam/MemFlow /app/memflow
 
+# Install MemFlow dependencies
+RUN pip3 install --no-cache-dir -r /app/memflow/requirements.txt
+
 # Download model checkpoints
 RUN pip3 install "huggingface_hub[cli]" && \
     huggingface-cli download Wan-AI/Wan2.1-T2V-1.3B --local-dir /app/wan_models/Wan2.1-T2V-1.3B && \
