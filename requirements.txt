@@ -24,3 +24,4 @@ pillow
 # Utilities
 numpy
 safetensors
+omegaconf
