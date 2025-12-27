@@ -52,10 +52,10 @@ async def startup_event():
     global pipeline, config
     try:
 # Import omegaconf if not already imported
-        if OmegaConf is None:
-            from omegaconf import OmegaConf
+        megaConf is None:
+        from omegaconf import OmegaConf
         
-                logger.info("Initializing MemFlow pipeline...")
+    logger.info("Initializing MemFlow pipeline...")
         
         # Import MemFlow modules
         from pipeline import CausalInferencePipeline
