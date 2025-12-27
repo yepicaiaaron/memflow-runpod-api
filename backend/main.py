@@ -52,7 +52,7 @@ async def startup_event():
     global pipeline, config
     try:
 # Import omegaconf if not already imported
-        megaConf is None:
+        if OmegaConf is None:
         from omegaconf import OmegaConf
         
     logger.info("Initializing MemFlow pipeline...")
