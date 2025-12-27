@@ -6,7 +6,10 @@ from pydantic import BaseModel
 import sys
 import os
 import torch
-from omegaconf import OmegaConf
+try:
+    from omegaconf import OmegaConf
+except ImportError:
+    OmegaConf = None  # Will be imported later in startup_event
 import logging
 from pathlib import Path
 import uuid
@@ -48,7 +51,11 @@ async def startup_event():
     """Initialize MemFlow pipeline on startup."""
     global pipeline, config
     try:
-        logger.info("Initializing MemFlow pipeline...")
+# Import omegaconf if not already imported
+        if OmegaConf is None:
+            from omegaconf import OmegaConf
+        
+                logger.info("Initializing MemFlow pipeline...")
         
         # Import MemFlow modules
         from pipeline import CausalInferencePipeline
