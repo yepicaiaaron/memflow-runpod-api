@@ -93,7 +93,7 @@ async def generate_video(request: VideoRequest):
         logger.info(f"Running command: {' '.join(cmd)}")
         process = subprocess.run(
             cmd,
-            cwd=str(MEMFLOW_DIR),
+            
             capture_output=True,
             text=True,
             timeout=300  # 5 minute timeout
@@ -168,7 +168,6 @@ async def generate_interactive_video(request: InteractiveVideoRequest):
         process = subprocess.run(
             cmd,
             cwd=str(MEMFLOW_DIR),
-                    ]
             capture_output=True,
             text=True,
             timeout=600  # 10 minute timeout for long video
