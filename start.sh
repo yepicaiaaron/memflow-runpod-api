@@ -1,6 +1,4 @@
 #!/bin/bash
-set -e
-
 echo "Starting MemFlow RunPod Setup..."
 
 # Install system dependencies
