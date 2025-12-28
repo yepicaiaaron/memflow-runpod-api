@@ -36,8 +36,7 @@ cd memflow
 
 # Install MemFlow dependencies
 echo "Installing MemFlow dependencies..."
-/usr/bin/python3 -m pip install -r requirements.txt
-# Download models
+grep -v 'nvidia-pyindex' /workspace/memflow/requirements.txt > /tmp/memflow_requirements_filtered.txt && /usr/bin/python3 -m pip install -r /tmp/memflow_requirements_filtered.txt# Download models
 echo "Downloading models..."
 mkdir -p wan_models/Wan2.1-T2V-1.3B checkpoints
 huggingface-cli download Wan-AI/Wan2.1-T2V-1.3B --local-dir wan_models/Wan2.1-T2V-1.3B
